@@ -5,8 +5,11 @@ You need Python3 to run the project:
 
 ```bash
 # Run the project
-pip install -r  -r requirements.txt
+pip install -r requirements.txt
 python app.py
 ```
 
-[Macaroon API ](https://dashboard.snapcraft.io/docs/api/macaroon.html)
+# Documentation
+* [Macaroon API ](https://dashboard.snapcraft.io/docs/api/macaroon.html)
+* [Flask Openid](https://pythonhosted.org/Flask-OpenID/)
+* [Source of inspiration for Openid](https://github.com/mitsuhiko/flask-openid/blob/master/example/example.py)
