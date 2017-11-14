@@ -1,0 +1,9 @@
+__pycache__/
+bin/
+flask-openid.db
+include/
+lib/
+local/
+pip-selfcheck.json
+users/
+

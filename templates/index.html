@@ -1,0 +1,15 @@
+<h1>Login Proof of concept</h1>
+
+<form action="/login" method=post>
+  <input type="submit" value="Login" />
+</form>
+
+<div>
+  <a href="/logged">Go to super protected page</a>
+</div>
+
+{% if connected %}
+  <a href="/logout">Logout</a>
+{% endif %}
+
+<p>Created by Toto</p>
