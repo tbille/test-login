@@ -1,63 +1,18 @@
 import flask
 import requests
+from macaroon import MacaroonRequest
+from macaroon import MacaroonResponse
 from flask_openid import OpenID
-from openid.extension import Extension as OpenIDExtension
 from pymacaroons import Macaroon
-
-
-class MacaroonRequest(OpenIDExtension):
-    ns_uri = 'http://ns.login.ubuntu.com/2016/openid-macaroon'
-    ns_alias = 'macaroon'
-
-    def __init__(self, caveat_id):
-        self.caveat_id = caveat_id
-
-    def getExtensionArgs(self):
-        """
-        Return the arguments to add to the OpenID request query
-        """
-
-        return {
-            'caveat_id': self.caveat_id
-        }
-
-
-class MacaroonResponse(OpenIDExtension):
-    ns_uri = 'http://ns.login.ubuntu.com/2016/openid-macaroon'
-    ns_alias = 'macaroon'
-
-    def getExtensionArgs(self):
-        """
-        Return the arguments to add to the OpenID request query
-        """
-
-        return {
-            'discharge': self.discharge
-        }
-
-    def fromSuccessResponse(cls, success_response, signed_only=True):
-        self = cls()
-        if signed_only:
-            args = success_response.getSignedNS(self.ns_uri)
-        else:
-            args = success_response.message.getArgs(self.ns_uri)
-
-        if not args:
-            return None
-
-        self.discharge = args['discharge']
-
-        return self
-
-    fromSuccessResponse = classmethod(fromSuccessResponse)
-
 
 app = flask.Flask(__name__)
 app.config.update(
     SECRET_KEY="This is a super secret key!",
     DEBUG=True
 )
+
 UBUNTU_SSO_URL = "https://login.ubuntu.com"
+SCA_BASE_URL = "https://dashboard.snapcraft.io/dev/api/"
 
 oid = OpenID(
     app,
@@ -72,21 +27,44 @@ def get_authorization_header(root, discharge):
     """
 
     bound = Macaroon.deserialize(root).prepare_for_request(
-        Macaroon.deserialize(discharge))
+        Macaroon.deserialize(discharge)
+    )
 
     return 'Macaroon root={}, discharge={}'.format(root, bound.serialize())
 
 
+def is_connected():
+    return (
+        'openid' in flask.session or
+        'macaroon_discharge' in flask.session or
+        'macaroon_root' in flask.session
+    )
+
+
+def redirect_to_login():
+    return flask.redirect(
+        'login?next=' +
+        flask.request.url_rule.rule
+    )
+
+
 @app.route('/')
 def homepage():
-    return flask.render_template('index.html')
+    context = {}
+    if is_connected():
+        context['connected'] = True
+
+    return flask.render_template('index.html', **context)
 
 
 @app.route('/login', methods=['GET', 'POST'])
 @oid.loginhandler
 def login():
+    if is_connected():
+        return flask.redirect(oid.get_next_url())
+
     response = requests.request(
-        url='https://dashboard.snapcraft.io/dev/api/acl/',
+        url=SCA_BASE_URL + '/acl/',
         method='POST',
         json={'permissions': ['package_access']},
         headers={
@@ -115,15 +93,23 @@ def login():
 
 
 @oid.after_login
-def create_or_login(resp):
+def after_login(resp):
     flask.session['openid'] = resp.identity_url
-
     flask.session['macaroon_discharge'] = resp.extensions['macaroon'].discharge
+
+    return flask.redirect(oid.get_next_url())
+
+
+@app.route('/app-detail')
+def get_app_detail():
+    if not is_connected():
+        return redirect_to_login()
 
     authorization = get_authorization_header(
         flask.session['macaroon_root'],
         flask.session['macaroon_discharge']
     )
+
     headers = {
         'X-Ubuntu-Series': '16',
         'X-Ubuntu-Architecture': 'amd64',
@@ -146,8 +132,12 @@ def create_or_login(resp):
 
 @app.route('/logout')
 def logout():
-    flask.session.pop('openid', None)
-    return flask.redirect(oid.get_next_url())
+    if is_connected():
+        flask.session.pop('macaroon_root', None)
+        flask.session.pop('macaroon_discharge', None)
+        flask.session.pop('openid', None)
+
+    return flask.redirect('/')
 
 
 if __name__ == '__main__':
