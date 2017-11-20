@@ -1,107 +1,147 @@
 import flask
+import requests
 from flask_openid import OpenID
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.orm import scoped_session, sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+from openid.extension import Extension as OpenIDExtension
+from pymacaroons import Macaroon
+
+
+class MacaroonRequest(OpenIDExtension):
+    ns_uri = 'http://ns.login.ubuntu.com/2016/openid-macaroon'
+    ns_alias = 'macaroon'
+
+    def __init__(self, caveat_id):
+        self.caveat_id = caveat_id
+
+    def getExtensionArgs(self):
+        """
+        Return the arguments to add to the OpenID request query
+        """
+
+        return {
+            'caveat_id': self.caveat_id
+        }
+
+
+class MacaroonResponse(OpenIDExtension):
+    ns_uri = 'http://ns.login.ubuntu.com/2016/openid-macaroon'
+    ns_alias = 'macaroon'
+
+    def getExtensionArgs(self):
+        """
+        Return the arguments to add to the OpenID request query
+        """
+
+        return {
+            'discharge': self.discharge
+        }
+
+    def fromSuccessResponse(cls, success_response, signed_only=True):
+        self = cls()
+        if signed_only:
+            args = success_response.getSignedNS(self.ns_uri)
+        else:
+            args = success_response.message.getArgs(self.ns_uri)
+
+        if not args:
+            return None
+
+        self.discharge = args['discharge']
+
+        return self
+
+    fromSuccessResponse = classmethod(fromSuccessResponse)
+
 
 app = flask.Flask(__name__)
 app.config.update(
-    DATABASE_URI = 'sqlite:///flask-openid.db',
-    SECRET_KEY = 'This is a super secret key!',
-    DEBUG = True
+    SECRET_KEY="This is a super secret key!",
+    DEBUG=True
 )
 UBUNTU_SSO_URL = "https://login.ubuntu.com"
 
-oid = OpenID(app, safe_roots=[])
-
-# setup sqlalchemy
-engine = create_engine(app.config['DATABASE_URI'])
-db_session = scoped_session(
-    sessionmaker(
-        autocommit=False,
-        autoflush=True,
-        bind=engine
-    )
+oid = OpenID(
+    app,
+    safe_roots=[],
+    extension_responses=[MacaroonResponse]
 )
-Base = declarative_base()
-Base.query = db_session.query_property()
-
-def init_db():
-    Base.metadata.create_all(bind=engine)
-
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    name = Column(String(60))
-    email = Column(String(200))
-    openid = Column(String(200))
-
-    def __init__(self, name, email, openid):
-        self.name = name
-        self.email = email
-        self.openid = openid
 
 
-@app.before_request
-def lookup_current_user():
-    flask.g.user = None
-    if 'openid' in flask.session:
-        openid = flask.session['openid']
-        flask.g.user = User.query.filter_by(openid=openid).first()
+def get_authorization_header(root, discharge):
+    """
+    Bind root and discharge macaroons and return the authorization header.
+    """
 
+    bound = Macaroon.deserialize(root).prepare_for_request(
+        Macaroon.deserialize(discharge))
 
-@app.after_request
-def after_request(response):
-    db_session.remove()
-    return response
+    return 'Macaroon root={}, discharge={}'.format(root, bound.serialize())
 
 
 @app.route('/')
 def homepage():
-    context = {}
-    if flask.g.user is not None:
-        context['connected'] = True
-    return flask.render_template('index.html', **context)
+    return flask.render_template('index.html')
 
 
 @app.route('/login', methods=['GET', 'POST'])
 @oid.loginhandler
 def login():
-    if flask.g.user is not None:
-        return flask.redirect(oid.get_next_url())
+    response = requests.request(
+        url='https://dashboard.snapcraft.io/dev/api/acl/',
+        method='POST',
+        json={'permissions': ['package_access']},
+        headers={
+            'Accept': 'application/json, application/hal+json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+        }
+    )
+    root = response.json()['macaroon']
+
+    caveat, = [
+        c for c in Macaroon.deserialize(root).third_party_caveats()
+        if c.location == 'login.ubuntu.com'
+    ]
+
+    openid_macaroon = MacaroonRequest(caveat_id=caveat.caveat_id)
+
+    flask.session['macaroon_root'] = root
 
     return oid.try_login(
         UBUNTU_SSO_URL,
         ask_for=['email', 'nickname'],
         ask_for_optional=['fullname'],
+        extensions=[openid_macaroon]
     )
 
 
 @oid.after_login
 def create_or_login(resp):
     flask.session['openid'] = resp.identity_url
-    user = User.query.filter_by(openid=resp.identity_url).first()
 
-    if user is not None:
-        flask.g.user = user
-    else:
-        db_session.add(
-            User(
-                resp.fullname,
-                resp.email,
-                flask.session['openid']
-            )
-        )
-        db_session.commit()
+    flask.session['macaroon_discharge'] = resp.extensions['macaroon'].discharge
 
-    return flask.redirect(oid.get_next_url())
+    authorization = get_authorization_header(
+        flask.session['macaroon_root'],
+        flask.session['macaroon_discharge']
+    )
+    headers = {
+        'X-Ubuntu-Series': '16',
+        'X-Ubuntu-Architecture': 'amd64',
+        'Authorization': authorization
+    }
+    url = (
+        'https://api.snapcraft.io/api/v1/snaps/details'
+        '/documentation-builder?revision=3'
+    )
 
+    response = requests.request(url=url, method='GET', headers=headers)
+    response.raise_for_status()
 
-@app.route('/logged')
-def logged():
-    if flask.g.user is None:
-        return flask.redirect('/login')
-    return flask.render_template('logged.html')
+    print('HTTP/1.1 {} {}'.format(response.status_code, response.reason))
+
+    return "<h1>documentation-builder v3</h1><p>{}</p>".format(
+        str(response.json())
+    )
 
 
 @app.route('/logout')
@@ -111,5 +151,4 @@ def logout():
 
 
 if __name__ == '__main__':
-    init_db()
     app.run()
