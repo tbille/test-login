@@ -1,15 +1,15 @@
 <h1>Login Proof of concept</h1>
 
-<form action="/login" method=post>
+<form action="{{ url_for('login') }}" method=post>
   <input type="submit" value="Login" />
 </form>
 
 <div>
-  <a href="/app-detail">Go to super protected page</a>
+  <a href="{{ url_for('get_app_detail') }}">Go to super protected page</a>
 </div>
 
 {% if connected %}
-  <a href="/logout">Logout</a>
+  <a href="{{ url_for('logout') }}">Logout</a>
 {% endif %}
 
 <p>Created by Toto</p>
