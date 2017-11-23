@@ -125,12 +125,11 @@ def login():
 def after_login(resp):
     flask.session['openid'] = resp.identity_url
     flask.session['macaroon_discharge'] = resp.extensions['macaroon'].discharge
+    return flask.redirect('/account')
 
-    return flask.redirect(oid.get_next_url())
 
-
-@app.route('/app-detail')
-def get_app_detail():
+@app.route('/account')
+def get_account():
     if not is_authenticated():
         return redirect_to_login()
 
@@ -144,11 +143,8 @@ def get_app_detail():
         'X-Ubuntu-Architecture': 'amd64',
         'Authorization': authorization
     }
-    url = (
-        "https://api.snapcraft.io/api/v1/snaps/details/"
-        "documentation-builder?revision=3"
-    )
 
+    url = 'https://dashboard.snapcraft.io/dev/api/account'
     response = requests.request(url=url, method='GET', headers=headers)
 
     if response.status_code > 400:
@@ -173,7 +169,7 @@ def get_app_detail():
 
     print('HTTP/1.1 {} {}'.format(response.status_code, response.reason))
 
-    return "<h1>Documentation builder v3</h1><p>{}</p>".format(
+    return "<h1>Developer Account</h1><p>{}</p>".format(
         str(response.json())
     )
 
