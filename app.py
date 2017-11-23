@@ -66,7 +66,6 @@ def request_macaroon():
 
 
 def verify_macaroon(root, discharge, url):
-
     authorization = get_authorization_header(root, discharge)
     response = requests.request(
         url='https://dashboard.snapcraft.io/dev/api/acl/verify/',
@@ -86,6 +85,25 @@ def verify_macaroon(root, discharge, url):
     )
 
     return response.json()
+
+
+def get_refreshed_discharge(discharge):
+    url = (
+        'https://login.ubuntu.com'
+        '/api/v2/tokens/refresh'
+    )
+    response = requests.request(
+        url=url,
+        method='POST',
+        json={'discharge_macaroon': discharge},
+        headers={
+            'Accept': 'application/json, application/hal+json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+        }
+    )
+
+    return response.json()['discharge_macaroon']
 
 
 @app.route('/')
@@ -146,6 +164,14 @@ def get_account():
 
     url = 'https://dashboard.snapcraft.io/dev/api/account'
     response = requests.request(url=url, method='GET', headers=headers)
+
+    # Redirection to same url if my macaroon needs to be refreshed
+    if response.headers.get('WWW-Authenticate') == (
+            'Macaroon needs_refresh=1'):
+        flask.session['macaroon_discharge'] = get_refreshed_discharge(
+            flask.session['macaroon_discharge']
+        )
+        return flask.redirect('/account')
 
     if response.status_code > 400:
         verified = verify_macaroon(
