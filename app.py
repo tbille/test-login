@@ -79,35 +79,21 @@ def get_account():
     url = 'https://dashboard.snapcraft.io/dev/api/account'
     response = requests.request(url=url, method='GET', headers=headers)
 
-    # Redirection to same url if my macaroon needs to be refreshed
-    if response.headers.get('WWW-Authenticate') == (
-            'Macaroon needs_refresh=1'):
-        macaroon_discharge = authentication.get_refreshed_discharge(
-            flask.session['macaroon_discharge']
-        )
-        flask.session['macaroon_discharge'] = macaroon_discharge
+    verified_response = authentication.verify_response(
+        response,
+        flask.session,
+        url,
+        '/account',
+        '/login'
+    )
 
-        return flask.redirect('/account')
-
-    if response.status_code > 400:
-        verified = authentication.verify_macaroon(
-            flask.session['macaroon_root'],
-            flask.session['macaroon_discharge'],
-            url
-        )
-
-        # Macaroon not valid anymore, needs refresh
-        if verified['account'] is None:
-            authentication.empty_session(flask.session)
-            return flask.redirect('/login')
-
-        # Not authorized content
-        if response.status_code == 401 and not verified['allowed']:
-            return response.raise_for_status()
-
-        # The package doesn't exist
-        if verified['account'] is not None and response.status_code == 404:
-            return response.raise_for_status()
+    if verified_response is not None:
+        if verify_response['redirect'] is None:
+            return response.raise_for_status
+        else:
+            return flask.redirect(
+                validate_response.redirect
+            )
 
     print('HTTP/1.1 {} {}'.format(response.status_code, response.reason))
 
