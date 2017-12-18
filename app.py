@@ -1,8 +1,8 @@
 import flask
 import requests
+import authentication
 from macaroon import MacaroonRequest, MacaroonResponse
 from flask_openid import OpenID
-from pymacaroons import Macaroon
 
 app = flask.Flask(__name__)
 app.config.update(
@@ -17,32 +17,6 @@ oid = OpenID(
 )
 
 
-def get_authorization_header(root, discharge):
-    """
-    Bind root and discharge macaroons and return the authorization header.
-    """
-
-    bound = Macaroon.deserialize(root).prepare_for_request(
-        Macaroon.deserialize(discharge)
-    )
-
-    return 'Macaroon root={}, discharge={}'.format(root, bound.serialize())
-
-
-def is_authenticated():
-    return (
-        'openid' in flask.session and
-        'macaroon_discharge' in flask.session and
-        'macaroon_root' in flask.session
-    )
-
-
-def empty_session():
-    flask.session.pop('macaroon_root', None)
-    flask.session.pop('macaroon_discharge', None)
-    flask.session.pop('openid', None)
-
-
 def redirect_to_login():
     return flask.redirect(''.join([
         'login?next=',
@@ -50,66 +24,10 @@ def redirect_to_login():
     ]))
 
 
-def request_macaroon():
-    response = requests.request(
-        url='https://dashboard.snapcraft.io/dev/api/acl/',
-        method='POST',
-        json={'permissions': ['package_access']},
-        headers={
-            'Accept': 'application/json, application/hal+json',
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-        }
-    )
-
-    return response.json()['macaroon']
-
-
-def verify_macaroon(root, discharge, url):
-    authorization = get_authorization_header(root, discharge)
-    response = requests.request(
-        url='https://dashboard.snapcraft.io/dev/api/acl/verify/',
-        method='POST',
-        json={
-            'auth_data': {
-                'authorization': authorization,
-                'http_uri': url,
-                'http_method': 'GET'
-            }
-        },
-        headers={
-            'Accept': 'application/json, application/hal+json',
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-        }
-    )
-
-    return response.json()
-
-
-def get_refreshed_discharge(discharge):
-    url = (
-        'https://login.ubuntu.com'
-        '/api/v2/tokens/refresh'
-    )
-    response = requests.request(
-        url=url,
-        method='POST',
-        json={'discharge_macaroon': discharge},
-        headers={
-            'Accept': 'application/json, application/hal+json',
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-        }
-    )
-
-    return response.json()['discharge_macaroon']
-
-
 @app.route('/')
 def homepage():
     context = {}
-    if is_authenticated():
+    if authentication.is_authenticated(flask.session):
         context['connected'] = True
 
     return flask.render_template('index.html', **context)
@@ -118,17 +36,13 @@ def homepage():
 @app.route('/login', methods=['GET', 'POST'])
 @oid.loginhandler
 def login():
-    if is_authenticated():
+    if authentication.is_authenticated(flask.session):
         return flask.redirect(oid.get_next_url())
 
-    root = request_macaroon()
-    caveat, = [
-        c for c in Macaroon.deserialize(root).third_party_caveats()
-        if c.location == 'login.ubuntu.com'
-    ]
-
-    openid_macaroon = MacaroonRequest(caveat_id=caveat.caveat_id)
-
+    root = authentication.request_macaroon()
+    openid_macaroon = MacaroonRequest(
+        caveat_id=authentication.get_caveat_id(root)
+    )
     flask.session['macaroon_root'] = root
 
     return oid.try_login(
@@ -148,10 +62,10 @@ def after_login(resp):
 
 @app.route('/account')
 def get_account():
-    if not is_authenticated():
+    if not authentication.is_authenticated(flask.session):
         return redirect_to_login()
 
-    authorization = get_authorization_header(
+    authorization = authentication.get_authorization_header(
         flask.session['macaroon_root'],
         flask.session['macaroon_discharge']
     )
@@ -168,13 +82,15 @@ def get_account():
     # Redirection to same url if my macaroon needs to be refreshed
     if response.headers.get('WWW-Authenticate') == (
             'Macaroon needs_refresh=1'):
-        flask.session['macaroon_discharge'] = get_refreshed_discharge(
+        macaroon_discharge = authentication.get_refreshed_discharge(
             flask.session['macaroon_discharge']
         )
+        flask.session['macaroon_discharge'] = macaroon_discharge
+
         return flask.redirect('/account')
 
     if response.status_code > 400:
-        verified = verify_macaroon(
+        verified = authentication.verify_macaroon(
             flask.session['macaroon_root'],
             flask.session['macaroon_discharge'],
             url
@@ -182,7 +98,7 @@ def get_account():
 
         # Macaroon not valid anymore, needs refresh
         if verified['account'] is None:
-            empty_session()
+            authentication.empty_session(flask.session)
             return flask.redirect('/login')
 
         # Not authorized content
@@ -202,8 +118,8 @@ def get_account():
 
 @app.route('/logout')
 def logout():
-    if is_authenticated():
-        empty_session()
+    if authentication.is_authenticated(flask.session):
+        authentication.empty_session(flask.session)
     return flask.redirect('/')
 
 
